@@ -292,25 +292,51 @@ impl Chunk {
     /// Scans each column downward and stops at the first non-air block, so a
     /// mostly empty world costs far less than a full sweep.
     pub fn recompute_heightmaps(&mut self, states: &BlockStates) {
-        let bits_max = self.limits.height;
-        for z in 0..SECTION_SIZE {
-            for x in 0..SECTION_SIZE {
-                let mut height = 0u32;
-                for y in (self.limits.min_y..=self.limits.max_y()).rev() {
-                    let index = ((y - self.limits.min_y) >> 4) as usize;
-                    let local_y = (y - self.limits.min_y) as usize & 0xF;
-                    if !states.is_air(self.sections[index].block(x, local_y, z)) {
-                        // Heightmaps store "one above the highest block", so a
-                        // block at min_y reports 1 and an empty column reports 0.
-                        height = (y - self.limits.min_y + 1) as u32;
-                        break;
+        // Heights are recorded as "one above the highest block", so a block at
+        // min_y reports 1 and a column with nothing in it reports 0. Zero
+        // therefore doubles as "not yet resolved".
+        let mut heights = [0u32; COLUMNS];
+        let mut unresolved = COLUMNS;
+
+        // Walk sections from the top down. An all-air section resolves nothing,
+        // and its emptiness is an O(1) question for a single-value container —
+        // so the tall empty stack above the surface, which is most of a real
+        // world, costs one check per section instead of 16 reads per column.
+        for index in (0..self.sections.len()).rev() {
+            if unresolved == 0 {
+                break;
+            }
+            let section = &self.sections[index];
+            if section.is_empty(states) {
+                continue;
+            }
+
+            let base = (index * SECTION_SIZE) as u32;
+            for local_y in (0..SECTION_SIZE).rev() {
+                if unresolved == 0 {
+                    break;
+                }
+                for z in 0..SECTION_SIZE {
+                    for x in 0..SECTION_SIZE {
+                        let column = z * SECTION_SIZE + x;
+                        // The first block found scanning downward wins, so a
+                        // resolved column is never revisited.
+                        if heights[column] != 0 {
+                            continue;
+                        }
+                        if !states.is_air(section.block(x, local_y, z)) {
+                            heights[column] = base + local_y as u32 + 1;
+                            unresolved -= 1;
+                        }
                     }
                 }
-                debug_assert!(height <= bits_max);
-                let column = z * SECTION_SIZE + x;
-                self.heightmaps.motion_blocking.set(column, height);
-                self.heightmaps.world_surface.set(column, height);
             }
+        }
+
+        for (column, &height) in heights.iter().enumerate() {
+            debug_assert!(height <= self.limits.height);
+            self.heightmaps.motion_blocking.set(column, height);
+            self.heightmaps.world_surface.set(column, height);
         }
     }
 
@@ -489,6 +515,108 @@ mod tests {
         }
         chunk.recompute_heightmaps(&states);
         assert_eq!(chunk.heightmaps().world_surface.get(column(5, 5)), 265);
+    }
+
+    /// Deliberately naive reference: scan every column from the top, one block
+    /// at a time, with no section skipping at all.
+    fn naive_heights(chunk: &Chunk, states: &BlockStates) -> Vec<u32> {
+        let limits = chunk.limits();
+        let mut out = vec![0u32; COLUMNS];
+        for z in 0..SECTION_SIZE {
+            for x in 0..SECTION_SIZE {
+                for y in (limits.min_y..=limits.max_y()).rev() {
+                    if !states.is_air(chunk.block(x, y, z, states)) {
+                        out[column(x, z)] = (y - limits.min_y + 1) as u32;
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_section_skipping_heightmap_agrees_with_a_naive_scan() {
+        // Guards the optimization: skipping empty sections must be invisible.
+        let states = states();
+        let limits = HeightLimits::OVERWORLD;
+        let mut chunk = Chunk::empty(ChunkPos::new(0, 0), limits, &states);
+
+        // A scattering of blocks across the full height range, including the
+        // very top and bottom, plus columns left entirely empty.
+        let mut seed = 0x1234_5678u32;
+        for z in 0..SECTION_SIZE {
+            for x in 0..SECTION_SIZE {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                if seed % 5 == 0 {
+                    continue; // leave this column empty
+                }
+                let count = (seed >> 8) % 4;
+                for n in 0..count {
+                    let y = limits.min_y + ((seed >> (n * 3 + 4)) % limits.height) as i32;
+                    chunk.set_block(x, y, z, states.stone, &states);
+                }
+            }
+        }
+        chunk.set_block(0, limits.max_y(), 0, states.stone, &states);
+        chunk.set_block(1, limits.min_y, 1, states.stone, &states);
+
+        let expected = naive_heights(&chunk, &states);
+        chunk.recompute_heightmaps(&states);
+
+        for (index, &want) in expected.iter().enumerate() {
+            assert_eq!(
+                chunk.heightmaps().world_surface.get(index),
+                want,
+                "column {index}"
+            );
+        }
+        // The extremes specifically.
+        assert_eq!(
+            chunk.heightmaps().world_surface.get(column(0, 0)),
+            limits.height
+        );
+        assert_eq!(chunk.heightmaps().world_surface.get(column(1, 1)), 1);
+    }
+
+    #[test]
+    fn an_empty_chunk_has_all_zero_heightmaps() {
+        let states = states();
+        let mut chunk = Chunk::empty(ChunkPos::new(0, 0), HeightLimits::OVERWORLD, &states);
+        chunk.recompute_heightmaps(&states);
+        for index in 0..COLUMNS {
+            assert_eq!(chunk.heightmaps().world_surface.get(index), 0, "{index}");
+        }
+    }
+
+    #[test]
+    fn recomputing_twice_is_idempotent() {
+        let states = states();
+        let mut chunk = Chunk::empty(ChunkPos::new(0, 0), HeightLimits::OVERWORLD, &states);
+        chunk.set_block(3, 70, 4, states.stone, &states);
+        chunk.recompute_heightmaps(&states);
+        let first = chunk.heightmaps().clone();
+        chunk.recompute_heightmaps(&states);
+        assert_eq!(chunk.heightmaps(), &first);
+    }
+
+    #[test]
+    fn clearing_a_column_lowers_its_height_on_recompute() {
+        // Stale state would survive if resolved columns were never reset.
+        let states = states();
+        let mut chunk = Chunk::empty(ChunkPos::new(0, 0), HeightLimits::OVERWORLD, &states);
+        chunk.set_block(0, 200, 0, states.stone, &states);
+        chunk.set_block(0, 10, 0, states.stone, &states);
+        chunk.recompute_heightmaps(&states);
+        assert_eq!(chunk.heightmaps().world_surface.get(column(0, 0)), 265);
+
+        chunk.set_block(0, 200, 0, states.air, &states);
+        chunk.recompute_heightmaps(&states);
+        assert_eq!(chunk.heightmaps().world_surface.get(column(0, 0)), 75);
+
+        chunk.set_block(0, 10, 0, states.air, &states);
+        chunk.recompute_heightmaps(&states);
+        assert_eq!(chunk.heightmaps().world_surface.get(column(0, 0)), 0);
     }
 
     #[test]

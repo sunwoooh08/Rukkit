@@ -42,8 +42,10 @@ Rukkit implements those from first principles against the published wire format,
 | World persistence (Anvil region files) | Not implemented |
 | Entities, physics, redstone, plugins | Not implemented |
 
-221 tests pass, `clippy` is clean, and the status-ping and login paths are covered by integration
-tests that drive a real TCP socket through the real codec.
+225 tests pass, `clippy` is clean, and the status-ping and login paths are covered by integration
+tests that drive a real TCP socket through the real codec. The binary has been run against a
+protocol-level client: it loads its config, binds, and answers a server-list ping with the correct
+status document and an exactly echoed pong payload.
 
 ### The provisional bit
 
@@ -119,15 +121,50 @@ that task only, not the server. An integration test asserts exactly that.
 ### Benchmarks
 
 ```sh
-cargo bench --workspace
+cargo bench -p rukkit-protocol --bench codec
+cargo bench -p rukkit-world --bench chunk
 ```
 
-Criterion suites cover varint encode/decode, framing with and without compression, AES-128-CFB8
-throughput, NBT, bit storage at every width, palette access across all three representations, chunk
-serialization, and generating a full view-distance-10 area.
+Measured on a 4-core container in criterion's `--quick` mode, release profile with fat LTO. These
+are indicative, not competitive claims — there is no Java baseline measured here, and `--quick` uses
+too few samples for criterion to report statistical significance.
 
-Note that AES-CFB8 costs one AES block operation *per byte* — that is what the protocol specifies,
-not an implementation choice. The `aes` crate dispatching to AES-NI is what makes it acceptable.
+| Benchmark | Result |
+| --- | --- |
+| VarInt write / read | 250 / 178 Melem/s |
+| `varint_len` | 653 Melem/s |
+| Frame encode, small packet, uncompressed | 8.0 ns (3.8 GiB/s) |
+| Frame encode, 64 KiB chunk-like, zlib-6 | 339 µs (184 MiB/s) |
+| Frame decode, same payload | 26.5 µs (2.3 GiB/s) |
+| AES-128-CFB8, either direction | 47 MiB/s |
+| NBT write / read, registry-shaped document | 514 / 147 MiB/s |
+| Bit storage random `get` | ~535 Melem/s |
+| Bit storage bulk `for_each` | ~1.28 Gelem/s |
+| Palette `get`, uniform section | 3.26 Gelem/s |
+| Palette `get`, indirect section | 466 Melem/s |
+| Fill a whole 4096-block section | 0.93 ns |
+| Non-air count, uniform section | 0.61 ns |
+| Serialize a chunk: empty / flat / worst case | 276 ns / 6.4 µs / 155 µs |
+| Generate a flat chunk | 32.7 µs |
+| Generate a view-distance-10 area (441 chunks) | 14.3 ms |
+
+Two of these are worth reading closely.
+
+**The single-value fast paths are not a rounding error.** Counting non-air blocks in a uniform
+section takes 0.61 ns against 9.0 µs for a palettised one — four orders of magnitude, because the
+predicate runs once instead of 4096 times. Filling a section is 0.93 ns rather than 4096 writes.
+Since most sections in a real world are uniform, this is where the memory and CPU budget is won.
+
+**The benchmarks already earned their keep.** The first run showed flat chunk generation at 231 µs,
+of which 206 µs was heightmap recomputation — it was scanning every column down the full 384-block
+height even though everything above the surface was empty air. Skipping empty sections (an O(1)
+question for a single-value container) cut it to 21 µs, taking chunk generation to 32.7 µs and a
+view-distance-10 area from 98.7 ms to 14.3 ms. A test compares the result against a deliberately
+naive scan so the optimisation cannot drift.
+
+Note that AES-CFB8 costs one AES block operation *per byte* and is strictly serial — that is what
+the protocol specifies, not an implementation choice — so 47 MiB/s per connection is close to the
+ceiling for the mode even with AES-NI. It is far above what a Minecraft connection actually carries.
 
 ## Running it
 
@@ -155,7 +192,7 @@ Logging follows `RUST_LOG`, e.g. `RUST_LOG=rukkit_server=debug cargo run --relea
 ## Testing
 
 ```sh
-cargo test --workspace     # 221 tests
+cargo test --workspace     # 225 tests
 cargo clippy --workspace --all-targets
 ```
 
