@@ -268,6 +268,10 @@ async fn login_reaches_configuration_and_enables_compression() {
     let name = r.read_string(16).unwrap();
     assert_eq!(name, "tester");
     assert_eq!(uuid, rukkit_server::offline_uuid("tester"));
+    assert_eq!(r.read_varint().unwrap(), 0, "no skin properties");
+    // The default config appends the trailing flag.
+    assert_eq!(r.remaining(), 1, "expected the trailing flag");
+    assert!(!r.read_bool().unwrap());
 
     // Acknowledge, and the server should move us into configuration.
     client
@@ -285,6 +289,64 @@ async fn login_reaches_configuration_and_enables_compression() {
         "minecraft:brand"
     );
     assert_eq!(r.read_string(DEFAULT_MAX_STRING_LEN).unwrap(), "Rukkit");
+}
+
+#[tokio::test]
+async fn the_login_finished_trailing_flag_follows_the_config() {
+    // A client that disagrees about this field rejects login_finished outright,
+    // so both layouts have to be reachable from configuration alone.
+    use rukkit_server::config::LoginFinishedFlag;
+
+    for (flag, expected_trailing) in [
+        (LoginFinishedFlag::Omit, 0usize),
+        (LoginFinishedFlag::SendFalse, 1),
+        (LoginFinishedFlag::SendTrue, 1),
+    ] {
+        let config = ServerConfig {
+            login_finished_flag: flag,
+            // Keep it uncompressed so the framing stays trivial here.
+            compression_threshold: -1,
+            ..test_config()
+        };
+        let addr = spawn_server(config, 1).await;
+        let mut client = TestClient::connect(addr).await;
+
+        client
+            .handshake(
+                version::PROTOCOL_VERSION,
+                handshake::NextState::Login,
+                addr.port(),
+            )
+            .await;
+
+        let mut packet = Vec::new();
+        packet.write_varint(login_packets::Hello::ID);
+        login_packets::Hello {
+            name: "tester".into(),
+            profile_id: uuid::Uuid::nil(),
+        }
+        .encode_body(&mut packet);
+        client.send_raw(&packet).await;
+
+        let finished = client.recv().await.expect("login_finished");
+        let mut r = PacketReader::new(&finished);
+        assert_eq!(
+            r.read_varint().unwrap(),
+            ids::login::clientbound::LOGIN_SUCCESS
+        );
+        r.read_uuid().unwrap();
+        assert_eq!(r.read_string(16).unwrap(), "tester");
+        assert_eq!(r.read_varint().unwrap(), 0);
+        assert_eq!(r.remaining(), expected_trailing, "layout for {flag:?}");
+
+        if expected_trailing == 1 {
+            assert_eq!(
+                r.read_bool().unwrap(),
+                flag == LoginFinishedFlag::SendTrue,
+                "flag value for {flag:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

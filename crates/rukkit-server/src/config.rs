@@ -5,6 +5,38 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// Whether `login_finished` carries the trailing "strict error handling" flag.
+///
+/// 1.21.2 added the flag and a later version dropped it again. Which applies to
+/// 26.2 cannot be derived from the wire format, and a client that disagrees
+/// rejects the packet with a decode error rather than negotiating, so this is
+/// settable instead of guessed. If login fails with
+/// `Failed to decode packet 'clientbound/minecraft:login_finished'`, try the
+/// other setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoginFinishedFlag {
+    /// Append the flag, set to false. The 1.21.2-1.21.4 layout.
+    #[default]
+    SendFalse,
+    /// Append the flag, set to true.
+    SendTrue,
+    /// Omit it. The 1.20.2-1.21.1 layout, and again in later versions.
+    Omit,
+}
+
+impl LoginFinishedFlag {
+    /// The value to encode, or `None` to leave the field off entirely.
+    #[must_use]
+    pub const fn value(self) -> Option<bool> {
+        match self {
+            Self::SendFalse => Some(false),
+            Self::SendTrue => Some(true),
+            Self::Omit => None,
+        }
+    }
+}
+
 /// Everything an operator can tune.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -22,6 +54,9 @@ pub struct ServerConfig {
     pub compression_threshold: i32,
     /// Whether to verify identities against Mojang's session servers.
     pub online_mode: bool,
+    /// Trailing flag on `login_finished`. Flip this if the client rejects that
+    /// packet; see [`LoginFinishedFlag`].
+    pub login_finished_flag: LoginFinishedFlag,
     /// Target ticks per second.
     pub tick_rate: u32,
     /// How often to probe clients for liveness.
@@ -44,6 +79,7 @@ impl Default for ServerConfig {
             // Offline by default: online mode needs session-server access, and
             // an operator should opt into it knowingly.
             online_mode: false,
+            login_finished_flag: LoginFinishedFlag::default(),
             tick_rate: 20,
             keepalive_interval_secs: 15,
             keepalive_timeout_secs: 30,
@@ -179,6 +215,34 @@ mod tests {
         let text = toml::to_string_pretty(&original).unwrap();
         let parsed: ServerConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn the_login_finished_flag_round_trips_through_toml() {
+        for (flag, text) in [
+            (LoginFinishedFlag::SendFalse, "send-false"),
+            (LoginFinishedFlag::SendTrue, "send-true"),
+            (LoginFinishedFlag::Omit, "omit"),
+        ] {
+            let config = ServerConfig {
+                login_finished_flag: flag,
+                ..ServerConfig::default()
+            };
+            let rendered = toml::to_string_pretty(&config).unwrap();
+            assert!(
+                rendered.contains(&format!(r#"login_finished_flag = "{text}""#)),
+                "{flag:?} rendered as: {rendered}"
+            );
+            let parsed: ServerConfig = toml::from_str(&rendered).unwrap();
+            assert_eq!(parsed.login_finished_flag, flag);
+        }
+    }
+
+    #[test]
+    fn the_login_finished_flag_maps_to_a_wire_value() {
+        assert_eq!(LoginFinishedFlag::SendFalse.value(), Some(false));
+        assert_eq!(LoginFinishedFlag::SendTrue.value(), Some(true));
+        assert_eq!(LoginFinishedFlag::Omit.value(), None);
     }
 
     #[test]

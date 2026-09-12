@@ -126,16 +126,42 @@ pub struct ProfileProperty {
 }
 
 /// Confirms the resolved identity and ends the login exchange.
+///
+/// The client calls this `login_finished`, which is the name that appears in
+/// its decode errors.
+///
+/// # The trailing flag
+///
+/// 1.21.2 appended a "strict error handling" boolean after the properties, and
+/// later versions dropped it again. Which side of that 26.2 falls on cannot be
+/// settled from the wire format — it needs the version's packet report — so the
+/// field is optional rather than guessed at: `Some` writes it, `None` omits it.
+/// A client that disagrees rejects the packet outright, so this is exactly the
+/// kind of thing worth being able to flip without a rebuild.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoginSuccess {
+pub struct LoginFinished {
     pub profile_id: Uuid,
     pub username: String,
     pub properties: Vec<ProfileProperty>,
+    pub strict_error_handling: Option<bool>,
 }
 
-impl ClientboundPacket for LoginSuccess {
+impl LoginFinished {
+    /// A profile with no skin properties.
+    #[must_use]
+    pub fn new(profile_id: Uuid, username: String, strict_error_handling: Option<bool>) -> Self {
+        Self {
+            profile_id,
+            username,
+            properties: Vec::new(),
+            strict_error_handling,
+        }
+    }
+}
+
+impl ClientboundPacket for LoginFinished {
     const ID: i32 = ids::login::clientbound::LOGIN_SUCCESS;
-    const NAME: &'static str = "LoginSuccess";
+    const NAME: &'static str = "LoginFinished";
 
     fn encode_body(&self, out: &mut Vec<u8>) {
         out.write_uuid(self.profile_id);
@@ -145,6 +171,9 @@ impl ClientboundPacket for LoginSuccess {
             out.write_string(&property.name);
             out.write_string(&property.value);
             out.write_option(property.signature.as_deref(), |o, s| o.write_string(s));
+        }
+        if let Some(strict) = self.strict_error_handling {
+            out.write_bool(strict);
         }
     }
 }
@@ -222,8 +251,8 @@ mod tests {
     }
 
     #[test]
-    fn login_success_encodes_properties_with_optional_signatures() {
-        let packet = LoginSuccess {
+    fn login_finished_encodes_properties_with_optional_signatures() {
+        let packet = LoginFinished {
             profile_id: Uuid::from_u128(7),
             username: "player".into(),
             properties: vec![
@@ -238,12 +267,13 @@ mod tests {
                     signature: None,
                 },
             ],
+            strict_error_handling: None,
         };
         let mut out = Vec::new();
         encode(&packet, &mut out);
 
         let mut r = PacketReader::new(&out);
-        assert_eq!(r.read_varint().unwrap(), LoginSuccess::ID);
+        assert_eq!(r.read_varint().unwrap(), LoginFinished::ID);
         assert_eq!(r.read_uuid().unwrap(), packet.profile_id);
         assert_eq!(r.read_string(MAX_USERNAME_LEN).unwrap(), "player");
         assert_eq!(r.read_varint().unwrap(), 2);
@@ -264,6 +294,60 @@ mod tests {
             None
         );
         assert!(r.is_empty());
+    }
+
+    /// Body length for a bare profile: 16 bytes of UUID, a 1-byte length
+    /// prefix plus the name, and a 1-byte empty property count.
+    fn bare_body_len(name: &str) -> usize {
+        16 + 1 + name.len() + 1
+    }
+
+    #[test]
+    fn the_trailing_flag_is_omitted_when_unset() {
+        let packet = LoginFinished::new(Uuid::from_u128(1), "player".into(), None);
+        let mut out = Vec::new();
+        encode(&packet, &mut out);
+        // One byte of packet id, then the body and nothing more.
+        assert_eq!(out.len(), 1 + bare_body_len("player"));
+    }
+
+    #[test]
+    fn the_trailing_flag_adds_exactly_one_byte_when_set() {
+        for strict in [false, true] {
+            let packet = LoginFinished::new(Uuid::from_u128(1), "player".into(), Some(strict));
+            let mut out = Vec::new();
+            encode(&packet, &mut out);
+            assert_eq!(
+                out.len(),
+                1 + bare_body_len("player") + 1,
+                "strict={strict}"
+            );
+            assert_eq!(*out.last().unwrap(), u8::from(strict));
+        }
+    }
+
+    #[test]
+    fn both_layouts_agree_up_to_the_trailing_flag() {
+        // The two encodings must differ only in that final byte; a divergence
+        // anywhere earlier would mean the toggle changed more than intended.
+        let without = {
+            let mut out = Vec::new();
+            encode(
+                &LoginFinished::new(Uuid::from_u128(9), "abc".into(), None),
+                &mut out,
+            );
+            out
+        };
+        let with = {
+            let mut out = Vec::new();
+            encode(
+                &LoginFinished::new(Uuid::from_u128(9), "abc".into(), Some(false)),
+                &mut out,
+            );
+            out
+        };
+        assert_eq!(with[..without.len()], without[..]);
+        assert_eq!(with.len(), without.len() + 1);
     }
 
     #[test]

@@ -274,11 +274,17 @@ async fn login_phase(conn: &mut Connection, ctx: &ServerContext) -> Result<(), C
         conn.enable_compression(threshold);
     }
 
-    conn.send(&login_packets::LoginSuccess {
-        profile_id: uuid,
-        username: hello.name.clone(),
-        properties: Vec::new(),
-    })
+    let trailing = ctx.config.login_finished_flag.value();
+    tracing::debug!(
+        player = %hello.name,
+        strict_error_handling = ?trailing,
+        "sending login_finished"
+    );
+    conn.send(&login_packets::LoginFinished::new(
+        uuid,
+        hello.name.clone(),
+        trailing,
+    ))
     .await?;
 
     let packet = conn.read_packet_timeout().await?;

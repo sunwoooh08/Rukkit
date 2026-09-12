@@ -6,8 +6,9 @@ A Minecraft **Java Edition 26.2** server core written in Rust, built for through
 > 100만 줄 이상의 Java 코드베이스이고, 그중 상당 부분은 재배포가 불가능해 Paper 자신도 패치
 > 형태로 배포합니다. 대신 Rukkit은 **서버 성능을 실제로 좌우하는 계층** — 와이어 코덱, NBT,
 > 압축·암호화, 팔레트 청크 저장소, 틱 루프 — 을 프로토콜 776 기준으로 밑바닥부터 구현합니다.
-> 현재 서버 목록 핑과 로그인/설정 단계까지 실제 클라이언트와 동작하며, 플레이 상태는 26.2
-> 패킷 ID 검증이 남아 있습니다. 자세한 범위는 아래 **Scope** 참고.
+> 서버 목록 핑은 실제 클라이언트와 동작이 확인됐습니다. 로그인은 `login_finished`까지 도달하지만
+> 이 패킷의 후행 필드가 26.2에서 어느 쪽인지 오프라인으로는 확정할 수 없어 `login_finished_flag`
+> 설정으로 전환하게 해뒀습니다. 플레이 상태 패킷 ID도 아직 미검증입니다. 아래 **Scope** 참고.
 
 ---
 
@@ -34,7 +35,7 @@ Rukkit implements those from first principles against the published wire format,
 | Text components (JSON + NBT forms) | Complete |
 | Frame codec: length prefixing, zlib, AES-128-CFB8 | Complete, round-tripped under all four combinations |
 | Handshake / Status / Ping | **Works with a real client's server list** |
-| Login (offline mode) → Configuration | Works, including the mid-stream compression switch |
+| Login (offline mode) → Configuration | Reaches the client; `login_finished` layout still being pinned down, see below |
 | Paletted chunk storage, heightmaps, flat generation | Complete |
 | Tick loop with TPS/MSPT percentiles | Complete |
 | Play state | Structurally present, **packet ids provisional** — see below |
@@ -42,7 +43,7 @@ Rukkit implements those from first principles against the published wire format,
 | World persistence (Anvil region files) | Not implemented |
 | Entities, physics, redstone, plugins | Not implemented |
 
-225 tests pass, `clippy` is clean, and the status-ping and login paths are covered by integration
+231 tests pass, `clippy` is clean, and the status-ping and login paths are covered by integration
 tests that drive a real TCP socket through the real codec. The binary has been run against a
 protocol-level client: it loads its config, binds, and answers a server-list ping with the correct
 status document and an exactly echoed pong payload.
@@ -55,6 +56,27 @@ derived from the wire format — they come from the version's own packet report.
 release line and are flagged `PROVISIONAL`; the server logs a warning if a connection reaches play.
 Handshake, status, login and configuration ids have been stable since 1.20.2 and are treated as
 settled.
+
+The same applies one packet earlier, and a real 26.2 client found it: login reaches `login_finished`
+and the client rejects it with
+
+```
+io.netty.handler.codec.DecoderException: Failed to decode packet 'clientbound/minecraft:login_finished'
+```
+
+That the client names the packet at all means framing, the compression switch and the packet id are
+all correct — only the body disagrees. 1.21.2 appended a trailing "strict error handling" boolean
+after the profile properties and a later version dropped it again, and which side 26.2 falls on
+needs the version's packet report. So it is configurable rather than guessed:
+
+```toml
+login_finished_flag = "send-false"   # append the flag (default)
+# login_finished_flag = "omit"       # leave it off
+# login_finished_flag = "send-true"
+```
+
+If login fails on that packet, try `"omit"`. An integration test covers all three layouts, so
+whichever turns out to be right is already exercised.
 
 Configuration also ends by disconnecting with an explanatory message rather than entering the world,
 because the client needs the 26.2 registry data (dimension types, biomes, damage types) before it
@@ -192,7 +214,7 @@ Logging follows `RUST_LOG`, e.g. `RUST_LOG=rukkit_server=debug cargo run --relea
 ## Testing
 
 ```sh
-cargo test --workspace     # 225 tests
+cargo test --workspace     # 231 tests
 cargo clippy --workspace --all-targets
 ```
 
