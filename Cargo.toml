@@ -1,0 +1,39 @@
+[workspace]
+members = ["crates/rukkit-protocol", "crates/rukkit-world", "crates/rukkit-server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/sunwoooh08/Rukkit"
+authors = ["sunwoooh08"]
+
+[workspace.dependencies]
+rukkit-protocol = { path = "crates/rukkit-protocol" }
+rukkit-world = { path = "crates/rukkit-world" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# The hot paths do a lot of deliberate integer width juggling; the protocol
+# defines exact widths, so casts are checked by construction rather than by lint.
+cast_possible_truncation = "allow"
+needless_range_loop = "allow"
+
+[profile.release]
+# A server is a long-lived process: trading compile time for steady-state
+# throughput is always the right call here.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# Deliberately *not* `abort`: a panic on one connection task must not take the
+# whole server down, so the runtime needs to unwind and drop that task only.
+panic = "unwind"
+
+[profile.bench]
+inherits = "release"
+debug = true

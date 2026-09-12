@@ -1,0 +1,36 @@
+[package]
+name = "rukkit-server"
+description = "Rukkit server runtime: networking, tick loop and player management"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+default-run = "rukkit"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rukkit"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+bytes = "1.12.1"
+md-5 = "0.10.6"
+parking_lot = "0.12.5"
+rand = "0.9.5"
+rukkit-protocol.workspace = true
+rukkit-world.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
+toml = "1.0.7"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.20.0", features = ["v4", "serde"] }
+
+[dev-dependencies]

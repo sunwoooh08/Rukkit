@@ -1,0 +1,31 @@
+[package]
+name = "rukkit-protocol"
+description = "Minecraft Java Edition wire protocol (26.2 / protocol 776) codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aes = "0.8.4"
+bytes = "1.12.1"
+cfb8 = "0.8.1"
+flate2 = "1.1.10"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tracing = "0.1.44"
+uuid = { version = "1.20.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+criterion = { version = "0.7.0", features = ["html_reports"] }
+rand = "0.9.5"
+
+[[bench]]
+name = "codec"
+harness = false

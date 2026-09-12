@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Runtime state produced by a local server instance
+/run
+/world
+rukkit.toml
